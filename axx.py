@@ -405,11 +405,30 @@ def term10(s,idx):
             break
     return (x,idx)
 
+def term11(s,idx):
+    (x,idx)=term10(s,idx)
+    while True:
+        if q(s,'?',idx):
+            (t,idx)=term10(s,idx+1)
+            x=t
+            if q(s,':',idx):
+                (u,idx)=term10(s,idx+1)
+                if (x==0):
+                    x=u
+                else:
+                    pass
+            else:
+                pass
+        else:
+            break
+    return (x,idx)
+
+
 
 def expression(s,idx):
     s+=chr(0)
     idx=skipspc(s,idx)
-    (x,idx)=term10(s,idx)
+    (x,idx)=term11(s,idx)
     return (x,idx)
 
 def expression0(s,idx):
@@ -1111,6 +1130,7 @@ def main():
         pat=readpat(sys_argv[1])
 
     (sys_argv,expfile)=option(sys_argv,"-e")
+    (sys_argv,expefile)=option(sys_argv,"-E")
     (sys_argv,outfile)=option(sys_argv,'-o')
     (sys_argv,impfile)=option(sys_argv,"-i")
 
@@ -1157,14 +1177,20 @@ def main():
         ln=1
         fileassemble(sys.argv[2])
 
+    if expefile!="":
+        expfile=expefile
+        elf=1
+    else:
+        elf=0
+
     if expfile!="":
         h=list(export_labels.items())
         key=list(sections.keys())
         with open(expfile,"wt") as label_file:
             for i in key:
-                if i=='.text':
+                if i=='.text' and elf==1:
                     flag='AX'
-                elif i=='.data':
+                elif i=='.data' and elf==1:
                     flag='WA'
                 else:
                     flag=''
