@@ -4,10 +4,12 @@
 # axx general assembler designed and programmed by Taisuke Maekawa
 #
 
+from decimal import Decimal, getcontext
 import string as str
 import subprocess
 import itertools
 import struct
+import numpy as np
 import sys
 import os
 import re
@@ -41,6 +43,9 @@ expmode=EXP_PAT
 error_undefined_label=False
 error_already_defined=False
 align=32
+bts=8
+bts_endian='little'
+byte='yes'
 pas=0
 debug=0
 cl=""
@@ -65,16 +70,13 @@ def upper(o):
 
 def outbin2(a,x):
     if pas==2 or pas==0:
-        x=int(x)&0xff
-        if outfile!="":
-            fwrite(outfile,a,x)
+        x=int(x)
+        fwrite(outfile,a,x,0)
 
 def outbin(a,x):
     if pas==2 or pas==0:
-        x=int(x)&0xff
-        print(" 0x%02x" % x,end='')
-        if outfile!="":
-            fwrite(outfile,a,x)
+        x=int(x)
+        fwrite(outfile,a,x,1)
 
 def get_vars(s):
     c=ord(upper(s))
@@ -183,6 +185,112 @@ def put_label_value(k,v,s):
     labels[k]=[v,s]
     return True
 
+
+def decimal_to_ieee754_128bit_hex(a):
+    # IEEE 754 四倍精度の定義
+    BIAS = 16383
+    SIGNIFICAND_BITS = 112
+    EXPONENT_BITS = 15
+    
+    # Decimalモジュールの精度を設定
+    getcontext().prec = 34  # 四倍精度は約34桁の10進数精度に相当
+    
+    # 入力をDecimal型に変換
+    if a=='inf':
+        a='Infinity'
+    elif a=='-inf':
+        a='-Infinity'
+    elif a=='nan':
+        a='NaN'
+    d = Decimal(a)
+    
+    # 特殊ケースの処理
+    if d.is_nan():
+        # NaNの場合（符号=1、指数=全ビット1、仮数部は非ゼロ）
+        sign = 0
+        exponent = (1 << EXPONENT_BITS) - 1
+        fraction = 1 << (SIGNIFICAND_BITS - 1)  # 仮数部の最上位ビットを1に設定
+    elif d == Decimal('Infinity'):
+        # 正の無限大の場合（符号=0、指数=全ビット1、仮数部=0）
+        sign = 0
+        exponent = (1 << EXPONENT_BITS) - 1
+        fraction = 0
+    elif d == Decimal('-Infinity'):
+        # 負の無限大の場合（符号=1、指数=全ビット1、仮数部=0）
+        sign = 1
+        exponent = (1 << EXPONENT_BITS) - 1
+        fraction = 0
+    elif d == Decimal(0):
+        # ゼロの場合（符号のみ異なり、それ以外は全ビット0）
+        sign = 0 if d >= 0 else 1
+        exponent = 0
+        fraction = 0
+    else:
+        # 通常の数値の場合
+        sign = 0 if d >= 0 else 1
+        d = abs(d)
+        
+        # 指数部と仮数部を計算
+        exponent_value = d.adjusted() + BIAS
+        
+        if exponent_value <= 0:
+            # 非正規化数（指数が最小値未満）
+            exponent = 0
+            fraction = int(d.scaleb(BIAS - SIGNIFICAND_BITS).normalize() * (2**SIGNIFICAND_BITS))
+        else:
+            # 正規化数
+            exponent = exponent_value
+            normalized_value = d / (Decimal(2) ** d.adjusted())
+            fraction = int((normalized_value - 1) * (2**SIGNIFICAND_BITS))
+        
+        # 仮数部がオーバーフローしないように調整
+        fraction &= (1 << SIGNIFICAND_BITS) - 1
+    
+    # ビット列を組み立てる（符号 | 指数 | 仮数部）
+    bits = (sign << 127) | (exponent << SIGNIFICAND_BITS) | fraction
+    
+    # 結果を16進数文字列として返す
+    return f"0x{bits:032X}"
+
+"""
+# 使用例
+numbers = ['3.141592653589793238462643383279502884', 
+           '-3.141592653589793238462643383279502884', 
+           'Infinity', 
+           '-Infinity', 
+           'NaN', 
+           '0']
+
+for num in numbers:
+    result = decimal_to_ieee754_128bit_hex(Decimal(num))
+    print(f"{num} -> {result}")
+
+"""
+
+def get_intstr(s,idx):
+    fs=''
+    while(s[idx] in "0123456789"):
+        fs+=s[idx]
+        idx+=1
+    return(fs,idx)
+
+def get_floatstr(s,idx):
+    if s[idx:idx+3]=='inf':
+        fs='inf'
+        idx+=3
+    elif s[idx:idx+4]=='-inf':
+        fs='-inf'
+        idx+=4
+    elif s[idx:idx+3]=='nan':
+        fs='nan'
+        idx+=3
+    else:
+        fs=''
+        while(s[idx] in "0123456789-.e"):
+            fs+=s[idx]
+            idx+=1
+    return(fs,idx)
+
 def factor1(s,idx):
     x = 0
 
@@ -212,27 +320,46 @@ def factor1(s,idx):
             x=16*x+int(s[idx].lower(),16)
             idx+=1
 
-    elif q(s,'0d',idx):
-        idx+=2
-        fs=''
-        while(s[idx] in "0123456789.e"):
-            fs+=s[idx]
+    elif s[idx:idx+4]=='qad(':
+        idx+=4
+        (fs,idx)=get_floatstr(s,idx)
+        h=decimal_to_ieee754_128bit_hex(fs)
+        x=int(h,16)
+        if s[idx]==')':
             idx+=1
-        x=int.from_bytes(struct.pack('>d',float(fs)),"little")
 
-    elif q(s,'0f',idx):
-        idx+=2
-        fs=''
-        while(s[idx] in "0123456789.e"):
-            fs+=s[idx]
-            idx+=1
-        x=int.from_bytes(struct.pack('>f',float(fs)),"little")
+    elif s[idx:idx+4]=='flt(':
+        (x,idx)=expression(s,idx+3)
+        if (x==float('nan')):
+            x=0x7fc00000
+        elif (x==float('inf')):
+            x=0x7f800000
+        elif (x==float('-inf')):
+            x=0xff800000
+        else:
+            x=int.from_bytes(struct.pack('>f',x),"big")
 
-    elif s[idx].isdigit():
-        x=0
-        while(s[idx].isdigit()):
-            x=10*x+int(s[idx])
-            idx+=1
+    elif s[idx:idx+4]=='dbl(':
+        (x,idx)=expression(s,idx+3)
+        if (x==float('nan')):
+            x=0x7ff8000000000000
+        elif (x==float('inf')):
+            x=0x7ff0000000000000
+        elif (x==float('-inf')):
+            x=0xfff0000000000000
+        else:
+            x=int.from_bytes(struct.pack('>d',x),"big")
+
+    elif s[idx].isdigit() or s[idx:idx+3]=='nan' or s[idx:idx+4]=='-inf' or s[idx:idx+3]=='inf':
+        (fs,idxi)=get_intstr(s,idx)
+        (fs2,idxf)=get_floatstr(s,idx)
+        if fs==fs2:
+            x=int(fs)
+            idx=idxi
+        else:
+            x=float(fs2)
+            idx=idxf
+
     elif expmode==EXP_PAT and (s[idx] in lower and s[idx+1] not in lower):
         ch=s[idx]
         if s[idx+1:idx+3]==':=':
@@ -267,6 +394,12 @@ def term0(s,idx):
         if (s[idx]=='*'):
             (t,idx)=term0_0(s,idx+1)
             x*=t
+        elif s[idx]=='/' and s[idx+1]!='/':
+            (t,idx)=term0_0(s,idx+1)
+            if t==0:
+                err("Division by 0 error.")
+            else:
+                x=x/t
         elif q(s,'//',idx):
             (t,idx)=term0_0(s,idx+2)
             if t==0:
@@ -378,8 +511,6 @@ def term7(s,idx):
 def term8(s,idx):
     if s[idx:idx+4]=='not(':
         (x,idx)=expression(s,idx+3)
-        if s[idx]==')':
-            idx+=1
         x=not x
     else:
         (x,idx)=term7(s,idx)
@@ -478,13 +609,45 @@ def set_symbol(i):
     symbols[key]=v
     return True
 
+def bits(i):
+    global bts,bts_endian
+    if len(i)==0:
+        return False
+    if len(i)>1 and i[0]!='.bits':
+    	return False
+    if len(i)>=3:
+        if i[1]=='big':
+            bts_endian='big'
+        else:
+            bts_endian='little'
+        v,idx=expression0(i[2],0)
+    else:
+        v=8
+    bts=int(v)
+    return True
+
+def bytep(i):
+    global byte
+    if len(i)==0:
+        return False
+    if len(i)>1 and i[0]!='.byte':
+    	return False
+    if len(i)>=3:
+        if i[2]=='no':
+            byte='no'
+        else:
+            pass
+    else:
+        byte='yes'
+    return True
+
 def paddingp(i):
     global padding
     if len(i)==0:
         return False
     if len(i)>1 and i[0]!='.padding':
     	return False
-    if len(i)>3:
+    if len(i)>=3:
         v,idx=expression0(i[2],0)
     else:
         v=0
@@ -580,9 +743,42 @@ def readpat(fn):
     f.close()
     return w
 
-def fwrite(file_path, position, x):
-    with open(file_path, 'a+b') as file:
-        file.write(struct.pack('B',x))
+def fwrite(file_path, position, x,prt):
+    global bts,bts_endian,byte
+    b=8 if bts<=8 else bts
+    byts=b//8+(0 if b/8==b//8 else 1)
+    
+    if file_path!="":
+        file=open(file_path, 'a+b')
+        file.seek(position*byts)
+
+    cnt=0
+    if bts_endian=='little':
+        p=(2**bts)-1
+        for i in range(byts):
+            v=x&0xff&p
+            if file_path!="":
+                file.write(struct.pack('B',v))
+            if prt:
+                print(" 0x%02x" % v,end='')
+            x=x>>8
+            cnt+=1
+    else:
+        bp=(2**bts)-1
+        x=x&bp
+        p=0xff<<(byts*8-8)
+        for i in range(byts-1,-1,-1):
+            v=((x&p)>>(i*8))&0xff
+            if file_path!="":
+                file.write(struct.pack('B',v))
+            if prt:
+                print(" 0x%02x" % v,end='')
+            p=p>>8
+            cnt+=1
+
+    if file_path!="":
+        file.close()
+    return cnt
 
 def align_(addr):
     a=addr%align
@@ -1011,6 +1207,8 @@ def lineassemble(line):
         if set_symbol(i): continue
         if clear_symbol(i): continue
         if paddingp(i): continue
+        if bits(i): continue
+        if bytep(i): continue
         if symbolc(i): continue
         lw=len([_ for _ in i if _])
         if lw==0:
@@ -1020,10 +1218,14 @@ def lineassemble(line):
         if i[0]=='':
             break
         error_undefined_label=False
-        if match0(lin,i[0])==True:
-            if lw==3:
-                error(i[1])
-            of=makeobj(i[2])
+        try:
+            if match0(lin,i[0])==True:
+                if lw==3:
+                    error(i[1])
+                of=makeobj(i[2])
+                break
+        except:
+            se=True
             break
     else:
         se=True
@@ -1035,7 +1237,7 @@ def lineassemble(line):
             print(f"{current_file} : {ln} {cl}: undefined label error.")
             return False
         if se:
-            print(f"{current_file} : {ln} {cl}: error.")
+            print(f"{current_file} : {ln} {cl}: Syntax error.")
             return False
     return True
 
