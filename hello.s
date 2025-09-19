@@ -7,7 +7,7 @@ _hello:
         mov     eax, 1      ; sys_write (01)
         mov     edi, 1      ; stdout    (01)
         mov     edx,len:    ; length    (13)
-        movq    esi, msg    ; address
+        movq    rsi, msg    ; address
         syscall
         mov     edi, 0      ; return 0
         mov     eax, 60     ; sys_exit
